@@ -1,0 +1,10 @@
+name = "LParse"
+version = "0.1.0"
+defaultTargets = ["lparse"]
+
+[[lean_lib]]
+name = "LParse"
+
+[[lean_exe]]
+name = "lparse"
+root = "Main"
