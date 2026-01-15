@@ -22,8 +22,6 @@ instance {ε : Type u} [Inhabited ε] : Alternative (DCont ε) where
 instance {ε : Type u} : Monad (DCont ε) where
   bind x f := DCont.Intro (λρ => λbf => λef => run x ρ (λc => run (f c) ρ bf ef) ef)
 
-theorem dcont_id {α β ε} : ∀ (a : α) (f : α → β) (e : ε → β), run (pure f <*> pure a) β id e = f a := by simp
-
 inductive SafeParser (τ : Type u) (P : List τ → List τ → Prop) (α : Type v) where
   | Intro (pFunc : (tIn : List τ) → DCont String (α × {tOut : List τ // P tIn tOut}))
 
@@ -246,34 +244,43 @@ def testParserSome : StrongParser Char String := String.ofList <$> ((_root_.some
 
 def testParserMany : Parser Char String := String.ofList <$> ((many (char 'c' <|> char 't')) <<* (eoi : Parser Char Unit))
 
-def expressionFunc {τ α : Type u} [BEq τ] [ToString τ] (lp rp : τ) (atom : StrongParser τ α) (fullExprs exprs : List (StrongParser τ (α → α → α))) (H : exprs.length <= fullExprs.length) (t : List τ) : DCont String (α × {tOut : List τ // tOut.length < t.length}) := 
+def expressionFunc {τ α : Type u} [BEq τ] [ToString τ] (lp rp : StrongParser τ Unit) (atom : StrongParser τ α) (fullExprs exprs : List (StrongParser τ (α → α → α))) (H : exprs.length <= fullExprs.length) (t : List τ) : DCont String (α × {tOut : List τ // tOut.length < t.length}) := 
   DCont.Intro (λρ => λaf => λef => 
-  match exprs with
-  | [] => 
-    match t with
-    | [] => ef "Unexpected EOI!"
-    | h :: r => if h == lp then
-        run (expressionFunc lp rp atom fullExprs fullExprs (by grind) r) ρ (λ(ex,r) => match r with
-          | Subtype.mk (h' :: r') H => if h' == rp then af (ex,Subtype.mk r' (by grind)) else ef ("Expected " ++ toString rp)
-          | _ => ef ("Expected " ++ toString rp)
-          ) ef
-      else run (pFunc atom (h :: r)) ρ af ef
-  | (e :: er) => 
-    let pC := do
-      let (lhs,rlhs) <- expressionFunc lp rp atom fullExprs er (by grind) t 
-      let (tail,rrhs) <- manyFuncP (λt' => t'.length < t.length) (by grind) (λt' => do
-        let (f,rf) <- pFunc e t'
-        let (rhs, rff) <- expressionFunc lp rp atom fullExprs er (by grind) rf
-        return ((f,rhs),Subtype.mk rff.val (by grind))
-      ) rlhs
-      return (List.foldl (λres (f,o) => f res o) lhs tail,Subtype.mk rrhs.val (by grind))
-    let pO := expressionFunc lp rp atom fullExprs er (by grind) t 
-    run (pC <|> pO) ρ af ef
-    )
+    match exprs with
+    | [] => 
+      match t with
+      | [] => ef "Unexpected EOI!"
+      | x => 
+        let paren : DCont String (α × { tOut : List τ // tOut.length < x.length }):= do
+          let (_,r₀) <- pFunc lp x
+          let (e,r₁) <- expressionFunc lp rp atom fullExprs fullExprs (by grind) r₀
+          let (_,r₂) <- pFunc rp r₁ 
+          return (e,Subtype.mk r₂.val (by grind))
+        run (paren <|> pFunc atom x) ρ af ef
+    | (e :: er) => 
+      let pC := do
+        let (lhs,rlhs) <- expressionFunc lp rp atom fullExprs er (by grind) t 
+        let (tail,rrhs) <- manyFuncP (λt' => t'.length < t.length) (by grind) (λt' => do
+          let (f,rf) <- pFunc e t'
+          let (rhs, rff) <- expressionFunc lp rp atom fullExprs er (by grind) rf
+          return ((f,rhs),Subtype.mk rff.val (by grind))
+        ) rlhs
+        return (List.foldl (λres (f,o) => f res o) lhs tail,Subtype.mk rrhs.val (by grind))
+      run pC ρ af ef
+      )
   termination_by (t.length * (fullExprs.length + 1) + exprs.length)
   decreasing_by
     all_goals simp_wf
-    · grind 
+    · have Hrft : r₀.val.length < x.length := by grind
+      have Hineq : ∀ a b c, a < c → a * (b + 1) + b < c * (b + 1) := by 
+        intros a b c Hac
+        induction b
+        case zero =>
+          grind
+        case succ Hi n =>
+          grind
+      apply Hineq
+      exact Hrft
     · have Hrft : rf.val.length < t.length := by grind
       have Hineq : ∀ a b c d, a < d → a * (b + 1) + c < d * (b + 1) + (c + 1) := by 
         intros a b c d Had
@@ -285,12 +292,14 @@ def expressionFunc {τ α : Type u} [BEq τ] [ToString τ] (lp rp : τ) (atom : 
       apply Hineq
       exact Hrft
 
-def expression {τ α : Type u} [BEq τ] [ToString τ] (lp rp : τ) (atom : StrongParser τ α) (exprs : List (StrongParser τ (α → α → α))) : StrongParser τ α := 
+def expression {τ α : Type u} [BEq τ] [ToString τ] (lp rp : StrongParser τ Unit) (atom : StrongParser τ α) (exprs : List (StrongParser τ (α → α → α))) : StrongParser τ α := 
   SafeParser.Intro (expressionFunc lp rp atom exprs exprs (by grind))
 
-def sumEx.{u} : StrongParser Char Nat := expression '(' ')' nat.{u} [(λ_ => (· + ·)) <$> char.{u} '+']
+def parenExpression {α} : StrongParser Char α → List (StrongParser Char (α → α → α)) → StrongParser Char α := expression (discard $ char '(') (discard $ char ')') 
 
-def mathEx.{u} : StrongParser Char Nat := expression '(' ')' nat.{u} [(λc => if c == '+' then (· + ·) else (· - ·)) <$> (char.{u} '+' <|> char.{u} '-'),(λ_ => (· * ·)) <$> char.{u} '*']
+def sumEx.{u} : StrongParser Char Nat := expression (discard $ char '(') (discard $ char ')') nat.{u} [(λ_ => (· + ·)) <$> char.{u} '+']
+
+def mathEx.{u} : StrongParser Char Nat := expression (discard $ char '(') (discard $ char ')') nat.{u} [(λc => if c == '+' then (· + ·) else (· - ·)) <$> (char.{u} '+' <|> char.{u} '-'),(λ_ => (· * ·)) <$> char.{u} '*']
 
 #eval parse testParserMany "cctcctst".toList
 #eval parse testParserMany "cctcctt".toList
@@ -300,4 +309,4 @@ def mathEx.{u} : StrongParser Char Nat := expression '(' ')' nat.{u} [(λc => if
 #eval parse testParserSome "".toList
 #eval parse nat "12345".toList 
 #eval parse identifier "a12345".toList 
-#eval parse mathEx.{0} "10-(2+3+4)".toList 
+#eval parse mathEx "10-2+3+4".toList 
